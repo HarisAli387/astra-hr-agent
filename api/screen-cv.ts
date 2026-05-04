@@ -1,89 +1,65 @@
-import multer from 'multer';
-import * as pdfImport from 'pdf-parse';
-import nodemailer from 'nodemailer';
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 
-const pdf = (pdfImport as any).default || pdfImport;
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
-
-function runMulter(req: any, res: any): Promise<void> {
-  return new Promise((resolve, reject) => {
-    upload.single('cvFile')(req, res, (err: any) => (err ? reject(err) : resolve()));
-  });
-}
-
-export const config = { api: { bodyParser: false } };
+export const config = { api: { bodyParser: true, sizeLimit: '5mb' } };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
 
   try {
-    await runMulter(req, res);
+    const { jobDescription, candidateEmail, cvText: rawCvText } = req.body as any;
 
-    const body = (req as any).body || {};
-    const file = (req as any).file;
-    const { jobDescription, candidateEmail } = body;
-
-    if (!file) return res.status(400).json({ error: 'No CV uploaded.' });
+    if (!rawCvText) return res.status(400).json({ error: 'No CV text provided.' });
     if (!jobDescription) return res.status(400).json({ error: 'Job description is required.' });
 
-    let cvText = '';
-    if (file.mimetype === 'application/pdf') {
-      const data = await pdf(file.buffer);
-      cvText = data.text;
-    } else {
-      cvText = file.buffer.toString('utf-8');
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) return res.status(500).json({ error: 'Gemini API key not configured.' });
+
+    const prompt = `You are an expert HR recruiter. Analyze this CV against the job description and respond ONLY with valid JSON, no markdown, no explanation.
+
+Job Description:
+${jobDescription}
+
+CV Text:
+${rawCvText}
+
+Respond with exactly this JSON structure:
+{
+  "candidateName": "extracted full name or 'Unknown Candidate'",
+  "candidateEmail": "extracted email or 'Not Provided'",
+  "skillsDetected": ["skill1", "skill2", "skill3"],
+  "matchScore": 75,
+  "aiSummary": "2-3 sentence professional summary of fit"
+}`;
+
+    const geminiRes = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 512 },
+        }),
+      }
+    );
+
+    if (!geminiRes.ok) {
+      const errText = await geminiRes.text();
+      console.error('Gemini error:', errText);
+      return res.status(500).json({ error: 'AI analysis failed.' });
     }
 
-    const extractKeywords = (text: string) =>
-      Array.from(new Set(text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter((w: string) => w.length > 3)));
+    const geminiData = await geminiRes.json();
+    const rawText = geminiData.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
-    const jdWords = extractKeywords(jobDescription);
-    const cvWords = extractKeywords(cvText);
+    // Strip markdown code fences if present
+    const jsonText = rawText.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    const result = JSON.parse(jsonText);
 
-    let matchCount = 0;
-    const detectedSkills: string[] = [];
-
-    jdWords.forEach((word: string) => {
-      if (cvWords.includes(word)) {
-        matchCount++;
-        if (word.length > 4 && detectedSkills.length < 6) {
-          detectedSkills.push(word.charAt(0).toUpperCase() + word.slice(1));
-        }
-      }
-    });
-
-    let matchScore = jdWords.length > 0 ? Math.round((matchCount / jdWords.length) * 100) : 0;
-    matchScore = Math.min(98, matchScore + 35);
-
-    const emailMatch = cvText.match(/([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/);
-    const finalEmail = candidateEmail || (emailMatch ? emailMatch[1] : 'Not Provided');
-    const finalName = finalEmail !== 'Not Provided' ? finalEmail.split('@')[0] : 'Candidate';
-
-    const result = {
-      candidateName: finalName,
-      candidateEmail: finalEmail,
-      skillsDetected: detectedSkills.length > 0 ? detectedSkills : ['General Skills', 'Communication'],
-      matchScore,
-      aiSummary: `Candidate matches approximately ${matchScore}% of the requirements. Key areas: ${detectedSkills.join(', ') || 'general competencies'}.`,
-    };
-
-    if (result.candidateEmail && result.candidateEmail !== 'Not Provided') {
-      try {
-        const transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_APP_PWD },
-        });
-        await transporter.sendMail({
-          from: `"HR Recruitment" <${process.env.EMAIL_USER}>`,
-          to: result.candidateEmail,
-          subject: `Update on your Job Application - ${result.candidateName}`,
-          html: `<p>Hello <strong>${result.candidateName}</strong>, your CV has been processed. Match Score: <strong>${result.matchScore}%</strong>. Our team will be in touch.</p>`,
-        });
-      } catch (mailErr) {
-        console.error('Email send failed:', mailErr);
-      }
-    }
+    // Override email if user provided one
+    if (candidateEmail) result.candidateEmail = candidateEmail;
 
     return res.status(200).json(result);
   } catch (error: any) {

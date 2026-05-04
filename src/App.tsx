@@ -88,24 +88,46 @@ function Dashboard() {
 
     if (!jobDescription.trim()) {
       setErrorPrompt('Please enter a Job Description first so we can score the candidates correctly.');
-      e.target.value = ''; // reset file input
+      e.target.value = '';
       return;
     }
 
     setErrorPrompt(null);
     setIsProcessing(true);
 
-    const formData = new FormData();
-    formData.append('cvFile', file);
-    formData.append('jobDescription', jobDescription);
-    if (candidateEmailInput) {
-      formData.append('candidateEmail', candidateEmailInput);
-    }
-
     try {
+      // Extract text client-side to avoid server-side PDF parsing issues
+      let cvText = '';
+      if (file.type === 'application/pdf') {
+        const arrayBuffer = await file.arrayBuffer();
+        const bytes = new Uint8Array(arrayBuffer);
+        // Extract readable ASCII text from PDF bytes
+        const raw = new TextDecoder('latin1').decode(bytes);
+        const matches = raw.match(/\(([^)]{2,})\)/g) || [];
+        cvText = matches.map(m => m.slice(1, -1)).join(' ').replace(/\\n/g, '\n').replace(/\\/g, '');
+        if (cvText.length < 100) {
+          // Fallback: grab any readable text chunks
+          cvText = raw.replace(/[^\x20-\x7E\n]/g, ' ').replace(/\s{3,}/g, ' ').trim().slice(0, 8000);
+        }
+      } else {
+        cvText = await file.text();
+      }
+
+      if (!cvText.trim()) {
+        setErrorPrompt('Could not extract text from this file. Please try a text-based PDF or .txt file.');
+        e.target.value = '';
+        setIsProcessing(false);
+        return;
+      }
+
       const response = await fetch('/api/screen-cv', {
         method: 'POST',
-        body: formData,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          cvText: cvText.slice(0, 8000),
+          jobDescription,
+          candidateEmail: candidateEmailInput || undefined,
+        }),
       });
 
       if (!response.ok) {
