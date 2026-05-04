@@ -1,6 +1,7 @@
 import express from 'express';
 import multer from 'multer';
-import { PDFParse } from 'pdf-parse';
+import pdfParseModule from 'pdf-parse';
+const PDFParse = (pdfParseModule as any).PDFParse || pdfParseModule;
 
 // Disable Vercel's default body parser so multer can process the multipart/form-data stream
 export const config = {
