@@ -1,20 +1,26 @@
 import express from 'express';
 import multer from 'multer';
-import * as pdfParseModule from 'pdf-parse';
-const PDFParse = (pdfParseModule as any).PDFParse || pdfParseModule;
+import * as pdfImport from 'pdf-parse';
+import nodemailer from 'nodemailer';
 
-// Disable Vercel's default body parser so multer can process the multipart/form-data stream
+// Robust import for pdf-parse to handle different module systems
+const pdf = (pdfImport as any).default || pdfImport;
+
+const app = express();
+
+// Disable Vercel's default body parser so multer can process the stream
 export const config = {
   api: {
     bodyParser: false,
   },
 };
-import nodemailer from 'nodemailer';
 
-const app = express();
 app.use(express.json());
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit for Vercel
+});
 
 const transporter = nodemailer.createTransport({
   service: 'gmail',
@@ -22,6 +28,11 @@ const transporter = nodemailer.createTransport({
     user: process.env.EMAIL_USER || 'harisrahat95@gmail.com',
     pass: process.env.EMAIL_APP_PWD || 'gycq ixhv mgyz ftux'
   }
+});
+
+// Health check endpoint to verify API is alive
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 app.post('/api/screen-cv', upload.single('cvFile'), async (req, res) => {
@@ -38,16 +49,20 @@ app.post('/api/screen-cv', upload.single('cvFile'), async (req, res) => {
     }
 
     let cvText = '';
-    if (file.mimetype === 'application/pdf') {
-      const parser = new PDFParse({ data: file.buffer });
-      const pdfeData = await parser.getText();
-      cvText = pdfeData.text;
-      await parser.destroy();
-    } else {
-      cvText = file.buffer.toString('utf-8');
+    try {
+      if (file.mimetype === 'application/pdf') {
+        // Standard pdf-parse function call
+        const data = await pdf(file.buffer);
+        cvText = data.text;
+      } else {
+        cvText = file.buffer.toString('utf-8');
+      }
+    } catch (parseErr: any) {
+      console.error('PDF Parse Error:', parseErr);
+      return res.status(500).json({ error: 'Failed to parse PDF file.' });
     }
 
-    console.log('Scoring CV locally without Gemini...');
+    console.log('Scoring CV locally...');
 
     const extractKeywords = (text: string) => {
       return Array.from(new Set(text.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 3)));
@@ -77,7 +92,7 @@ app.post('/api/screen-cv', upload.single('cvFile'), async (req, res) => {
     const finalEmail = candidateEmail || extractedEmail;
     const finalName = finalEmail !== 'Not Provided' ? finalEmail.split('@')[0] : 'Candidate';
 
-    let result: any = {
+    const result = {
       candidateName: finalName,
       candidateEmail: finalEmail,
       skillsDetected: detectedSkills.length > 0 ? detectedSkills : ["General Skills", "Communication"],
@@ -85,20 +100,21 @@ app.post('/api/screen-cv', upload.single('cvFile'), async (req, res) => {
       aiSummary: `Candidate matches approximately ${matchScore}% of the requirements based on keyword overlap. They have shown familiarity with key areas like ${detectedSkills.join(', ') || 'general competencies'}.`
     };
 
+    // Send email to candidate
     if (result.candidateEmail && result.candidateEmail !== 'Not Provided' && !result.candidateEmail.includes('Unknown')) {
       const statusMailOptions = {
-        from: '"HR Recruitment" <harisrahat95@gmail.com>',
+        from: `"HR Recruitment" <${process.env.EMAIL_USER || 'harisrahat95@gmail.com'}>`,
         to: result.candidateEmail,
-        cc: 'harisrahat95@gmail.com',
+        cc: process.env.EMAIL_USER || 'harisrahat95@gmail.com',
         subject: `Update on your Job Application - ${result.candidateName}`,
         text: `Hello ${result.candidateName},\n\nThank you for submitting your CV.\nWe have successfully processed it through our HR screening agent.\n\nHere are the insights based on the job description:\n- Match Score: ${result.matchScore}%\n- Summary: ${result.aiSummary}\n- Detected Skills: ${result.skillsDetected.join(', ')}\n\nWe will review these details and our HR team will get back to you regarding the next steps.\n\nBest regards,\nHR Team`,
         html: `
-          <div style="font-family: sans-serif; padding: 20px;">
-            <h2>Update on your Job Application</h2>
+          <div style="font-family: sans-serif; padding: 20px; color: #333;">
+            <h2 style="color: #000;">Update on your Job Application</h2>
             <p>Hello <strong>${result.candidateName}</strong>,</p>
             <p>Thank you for submitting your CV. We have successfully processed it through our HR screening agent.</p>
             <p>Here are the insights based on our job description:</p>
-            <ul>
+            <ul style="line-height: 1.6;">
               <li><strong>Match Score:</strong> ${result.matchScore}%</li>
               <li><strong>Summary:</strong> ${result.aiSummary}</li>
               <li><strong>Detected Skills:</strong> ${result.skillsDetected.join(', ')}</li>
@@ -109,18 +125,19 @@ app.post('/api/screen-cv', upload.single('cvFile'), async (req, res) => {
           </div>
         `
       };
+      
       try {
         await transporter.sendMail(statusMailOptions);
-        console.log("Status email sent to candidate:", result.candidateEmail);
       } catch (mailErr) {
         console.error("Failed to send status email:", mailErr);
+        // Don't fail the whole request if email fails
       }
     }
 
     res.json(result);
   } catch (error: any) {
-    console.error("API Route Error:", error);
-    res.status(500).json({ error: 'Internal server error while processing CV: ' + (error.message || '') });
+    console.error("Critical API Error:", error);
+    res.status(500).json({ error: 'Internal server error: ' + (error.message || 'Unknown error') });
   }
 });
 
@@ -133,17 +150,17 @@ app.post('/api/schedule-interview', async (req, res) => {
     }
 
     const mailOptions = {
-      from: '"HR Auto-Scheduler" <harisrahat95@gmail.com>',
+      from: `"HR Auto-Scheduler" <${process.env.EMAIL_USER || 'harisrahat95@gmail.com'}>`,
       to: candidateEmail,
-      cc: 'harisrahat95@gmail.com',
+      cc: process.env.EMAIL_USER || 'harisrahat95@gmail.com',
       subject: `Invitation for Interview - ${candidateName}`,
       text: `Dear ${candidateName},\n\nWe were impressed by your CV and would like to invite you for an interview on ${date} at ${time}.\n\nPlease let us know if this time works for you.\n\nBest regards,\nHR Team`,
       html: `
-        <div style="font-family: sans-serif; padding: 20px;">
-          <h2>Interview Invitation</h2>
+        <div style="font-family: sans-serif; padding: 20px; color: #333;">
+          <h2 style="color: #000;">Interview Invitation</h2>
           <p>Dear <strong>${candidateName}</strong>,</p>
           <p>We were very impressed by your recent application. We would like to invite you to an interview on:</p>
-          <h3>${date} at ${time}</h3>
+          <h3 style="background: #f4f4f4; padding: 10px; display: inline-block; border-radius: 4px;">${date} at ${time}</h3>
           <p>Please reply to this email to confirm your availability.</p>
           <br/>
           <p>Best regards,<br/><strong>HR Team</strong></p>
@@ -152,18 +169,17 @@ app.post('/api/schedule-interview', async (req, res) => {
     };
 
     await transporter.sendMail(mailOptions);
-
     res.json({ success: true, message: 'Interview scheduled and email sent successfully.' });
   } catch (error: any) {
     console.error('Error scheduling interview:', error);
-    res.status(500).json({ error: 'Failed to schedule interview: ' + (error.message || '') });
+    res.status(500).json({ error: 'Failed to schedule interview: ' + (error.message || 'Unknown error') });
   }
 });
 
-// Global error handler so Vercel doesn't return HTML 500 pages
+// Global error handler
 app.use((err: any, req: any, res: any, next: any) => {
-  console.error("Express Global Error:", err);
-  res.status(500).json({ error: "Internal API Error: " + err.message });
+  console.error("Global Error:", err);
+  res.status(500).json({ error: "A server error occurred: " + (err.message || 'Internal Server Error') });
 });
 
 export default app;
