@@ -72,6 +72,7 @@ function Dashboard() {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [errorPrompt, setErrorPrompt] = useState<string | null>(null);
+  const [candidateEmailInput, setCandidateEmailInput] = useState('');
   
   // Scheduling States
   const [scheduleModalOpen, setScheduleModalOpen] = useState(false);
@@ -97,6 +98,9 @@ function Dashboard() {
     const formData = new FormData();
     formData.append('cvFile', file);
     formData.append('jobDescription', jobDescription);
+    if (candidateEmailInput) {
+      formData.append('candidateEmail', candidateEmailInput);
+    }
 
     try {
       const response = await fetch('/api/screen-cv', {
@@ -195,11 +199,22 @@ function Dashboard() {
         <div className="bg-zinc-900/40 border border-zinc-800 p-6 rounded-xl">
           <h2 className="text-sm font-bold uppercase tracking-widest text-[#e0e0e0] flex items-center gap-2 mb-2">
             <UploadCloud className="w-4 h-4 text-zinc-400" />
-            Candidate CV
+            Candidate Information & CV
           </h2>
           <p className="text-[10px] text-zinc-500 uppercase tracking-widest mb-4">
             Upload PDF or TXT for AI parsing
           </p>
+
+          <div className="mb-4">
+            <label className="block text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-1">Candidate Email (Optional)</label>
+            <input 
+              type="email" 
+              value={candidateEmailInput}
+              onChange={(e) => setCandidateEmailInput(e.target.value)}
+              placeholder="Enter email to notify candidate"
+              className="w-full p-2.5 bg-zinc-900/50 border border-zinc-800 rounded-lg text-sm text-[#e0e0e0] focus:ring-1 focus:ring-zinc-600 focus:outline-none transition-all placeholder-zinc-600"
+            />
+          </div>
           
           <label className={`w-full group flex flex-col items-center justify-center h-32 border-2 border-dashed rounded-xl transition-all ${isProcessing ? 'border-zinc-800 bg-zinc-900/20 cursor-not-allowed' : 'border-zinc-700 hover:border-zinc-500 hover:bg-zinc-800/30 cursor-pointer'}`}>
             <div className="flex flex-col items-center justify-center pt-5 pb-6">
