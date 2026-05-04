@@ -1,8 +1,13 @@
 import express from 'express';
 import multer from 'multer';
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const { PDFParse } = require('pdf-parse');
+import { PDFParse } from 'pdf-parse';
+
+// Disable Vercel's default body parser so multer can process the multipart/form-data stream
+export const config = {
+  api: {
+    bodyParser: false,
+  },
+};
 import nodemailer from 'nodemailer';
 
 const app = express();
